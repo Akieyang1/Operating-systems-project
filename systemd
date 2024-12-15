@@ -1,0 +1,11 @@
+[Unit]
+Description=pcron Task Scheduler
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/pcron
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
