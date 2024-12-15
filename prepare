@@ -1,0 +1,12 @@
+# 创建 pcron 相关目录
+sudo mkdir -p /etc/pcron
+sudo touch /etc/pcrontab
+
+# 创建日志文件
+sudo mkdir -p /var/log
+sudo touch /var/log/pcron
+sudo chmod 600 /var/log/pcron
+
+# 创建权限文件
+sudo touch /etc/pcron.allow
+sudo touch /etc/pcron.deny
