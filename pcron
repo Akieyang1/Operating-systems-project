@@ -1,0 +1,188 @@
+#!/bin/bash
+
+# pcron - 任务调度器守护进程
+
+PCRON_DIR="/etc/pcron"
+PCRONTAB_FILE="$PCRON_DIR/pcrontab"
+LOG_FILE="/var/log/pcron"
+
+# 函数：记录日志
+log() {
+    local level="$1"
+    local message="$2"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $level: $message" >> "$LOG_FILE"
+}
+
+# 函数：检查权限（仅 root 运行）
+check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        echo "pcron 必须以 root 身份运行。"
+        exit 1
+    fi
+}
+
+# 函数：解析时间字段
+# 返回 0 表示匹配当前时间，1 表示不匹配
+check_time() {
+    local now_sec="$1"
+    local now_min="$2"
+    local now_hour="$3"
+    local now_day="$4"
+    local now_month="$5"
+    local now_week="$6"
+
+    local sec_field="$7"
+    local min_field="$8"
+    local hour_field="$9"
+    local day_field="${10}"
+    local month_field="${11}"
+    local week_field="${12}"
+
+    # 函数：匹配单个字段
+    match_field() {
+        local value="$1"
+        local field="$2"
+
+        if [ "$field" = "*" ]; then
+            return 0
+        elif [[ "$field" =~ ^\*\/([0-9]+)$ ]]; then
+            step="${BASH_REMATCH[1]}"
+            if (( value % step == 0 )); then
+                return 0
+            else
+                return 1
+            fi
+        elif [[ "$field" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+            start="${BASH_REMATCH[1]}"
+            end="${BASH_REMATCH[2]}"
+            if (( value >= start && value <= end )); then
+                return 0
+            else
+                return 1
+            fi
+        elif [[ "$field" =~ ^([0-9]+):([0-9]+)(:[0-9]+)*$ ]]; then
+            IFS=':' read -ra ADDR <<< "$field"
+            for val in "${ADDR[@]}"; do
+                if (( value == val )); then
+                    return 0
+                fi
+            done
+            return 1
+        elif [[ "$field" =~ ^([0-9]+)-([0-9]+)(~[0-9]+)*$ ]]; then
+            include_range="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}"
+            exclude_values=$(echo "$field" | grep -o "~[0-9]\+")
+            IFS='-' read -ra RANGE <<< "$include_range"
+            if (( value >= RANGE[0] && value <= RANGE[1] )); then
+                if [ -n "$exclude_values" ]; then
+                    for ex in $(echo "$exclude_values" | tr '~' ' '); do
+                        if (( value == ex )); then
+                            return 1
+                        fi
+                    done
+                fi
+                return 0
+            else
+                return 1
+            fi
+        else
+            if (( value == field )); then
+                return 0
+            else
+                return 1
+            fi
+        fi
+    }
+
+    # 检查各个时间字段
+    match_field "$now_sec" "$sec_field" || return 1
+    match_field "$now_min" "$min_field" || return 1
+    match_field "$now_hour" "$hour_field" || return 1
+    match_field "$now_day" "$day_field" || return 1
+    match_field "$now_month" "$month_field" || return 1
+    match_field "$now_week" "$week_field" || return 1
+
+    return 0
+}
+
+# 函数：执行命令
+execute_command() {
+    local command="$1"
+    local user="$2"
+
+    # 执行命令并捕获输出
+    output=$(bash -c "$command" 2>&1)
+    status=$?
+
+    if [ $status -eq 0 ]; then
+        log "INFO" "用户 $user 执行命令: $command 成功。输出: $output"
+    else
+        log "ERROR" "用户 $user 执行命令: $command 失败。输出: $output"
+    fi
+}
+
+# 函数：加载所有任务
+load_tasks() {
+    local tasks=()
+
+    # 读取全局 pcrontab 文件
+    if [ -f "$PCRONTAB_FILE" ]; then
+        while IFS= read -r line; do
+            # 忽略空行和注释
+            [[ -z "$line" || "$line" =~ ^# ]] && continue
+            tasks+=("$line")
+        done < "$PCRONTAB_FILE"
+    fi
+
+    # 读取 /etc/pcron/ 目录下的所有用户 pcrontab 文件
+    for user_crontab in "$PCRON_DIR"/pcrontab*; do
+        [ -f "$user_crontab" ] || continue
+        while IFS= read -r line; do
+            [[ -z "$line" || "$line" =~ ^# ]] && continue
+            tasks+=("$line")
+        done < "$user_crontab"
+    done
+
+    echo "${tasks[@]}"
+}
+
+# 主循环
+main_loop() {
+    while true; do
+        # 获取当前时间
+        now_sec=$(date +%S)
+        now_min=$(date +%M)
+        now_hour=$(date +%H)
+        now_day=$(date +%d)
+        now_month=$(date +%m)
+        now_week=$(date +%w) # 0-6, 0 表示周日
+
+        # 加载所有任务
+        tasks=$(load_tasks)
+
+        # 遍历所有任务
+        for task in $tasks; do
+            # 解析任务字段
+            IFS=' ' read -r sec min hour day month week command <<< "$task"
+
+            # 检查时间匹配
+            if check_time "$now_sec" "$now_min" "$now_hour" "$now_day" "$now_month" "$now_week" "$sec" "$min" "$hour" "$day" "$month" "$week"; then
+                # 获取任务所属用户（假设 pcrontab 文件名为 pcrontab<username>)
+                if [[ "$task" =~ ^/etc/pcron/pcrontab(.+)$ ]]; then
+                    task_user="${BASH_REMATCH[1]}"
+                else
+                    task_user="$USER"
+                fi
+                # 执行命令
+                execute_command "$command" "$task_user" &
+            fi
+        done
+
+        # 等待 1 秒
+        sleep 1
+    done
+}
+
+# 启动守护进程
+check_root
+log "INFO" "pcron 守护进程启动。"
+main_loop
