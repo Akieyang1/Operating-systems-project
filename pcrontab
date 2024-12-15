@@ -1,0 +1,124 @@
+#!/bin/bash
+
+# pcrontab - 管理 pcron 任务调度表
+
+PCRON_DIR="/etc/pcron"
+PCRONTAB_FILE="$PCRON_DIR/pcrontab$USER"
+ALLOW_FILE="/etc/pcron.allow"
+DENY_FILE="/etc/pcron.deny"
+
+# 检查权限
+check_permission() {
+    if [ -f "$ALLOW_FILE" ]; then
+        if ! grep -qw "$USER" "$ALLOW_FILE"; then
+            echo "用户 $USER 没有权限使用 pcrontab。"
+            exit 1
+        fi
+    elif [ -f "$DENY_FILE" ]; then
+        if grep -qw "$USER" "$DENY_FILE"; then
+            echo "用户 $USER 被拒绝使用 pcrontab。"
+            exit 1
+        fi
+    else
+        echo "未配置权限文件，默认拒绝所有用户。"
+        exit 1
+    fi
+}
+
+# 列出任务
+list_crontab() {
+    if [ -f "$PCRONTAB_FILE" ]; then
+        cat "$PCRONTAB_FILE"
+    else
+        echo "没有找到 pcrontab 文件。"
+    fi
+}
+
+# 编辑任务
+edit_crontab() {
+    TEMP_FILE="/tmp/pcrontab_temp"
+    cp "$PCRONTAB_FILE" "$TEMP_FILE" 2>/dev/null
+    if [ $? -ne 0 ]; then
+        touch "$TEMP_FILE"
+    fi
+    # 使用 Vim 进行编辑
+    vim "$TEMP_FILE"
+    # 保存修改
+    cp "$TEMP_FILE" "$PCRONTAB_FILE"
+    chmod 600 "$PCRONTAB_FILE"
+    rm "$TEMP_FILE"
+    echo "pcrontab 已更新。"
+}
+
+# 删除任务
+remove_crontab() {
+    if [ -f "$PCRONTAB_FILE" ]; then
+        rm "$PCRONTAB_FILE"
+        echo "pcrontab 文件已删除。"
+    else
+        echo "没有找到 pcrontab 文件。"
+    fi
+}
+
+# 解析命令行参数
+if [ "$EUID" -eq 0 ]; then
+    TARGET_USER="$2"
+else
+    TARGET_USER="$USER"
+fi
+
+while getopts ":u:ler" opt; do
+    case $opt in
+        u)
+            TARGET_USER="$OPTARG"
+            ;;
+        l)
+            ACTION="list"
+            ;;
+        e)
+            ACTION="edit"
+            ;;
+        r)
+            ACTION="remove"
+            ;;
+        \?)
+            echo "无效的选项: -$OPTARG" >&2
+            exit 1
+            ;;
+    esac
+done
+
+# 切换到目标用户
+if [ "$TARGET_USER" != "$USER" ]; then
+    if [ "$EUID" -ne 0 ]; then
+        echo "只有 root 用户可以指定其他用户。"
+        exit 1
+    fi
+    # 使用 sudo 切换用户环境
+    USER_HOME=$(eval echo "~$TARGET_USER")
+    PCRONTAB_FILE="$PCRON_DIR/pcrontab$TARGET_USER"
+    # 设置环境变量
+    export USER="$TARGET_USER"
+fi
+
+# 检查权限
+check_permission
+
+# 执行动作
+case $ACTION in
+    list)
+        list_crontab
+        ;;
+    edit)
+        edit_crontab
+        ;;
+    remove)
+        remove_crontab
+        ;;
+    *)
+        echo "使用方法: pcrontab [-u 用户] {-l | -e | -r}"
+        exit 1
+        ;;
+esac
+
+exit 0
