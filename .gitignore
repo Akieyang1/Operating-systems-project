@@ -1,0 +1,50 @@
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Thumbnails and metadata
+Icon?
+Thumbs.db
+
+# User-specific files
+*.swp
+*.swo
+*.bak
+*.orig
+*~
+
+# Bash history files
+*.bash_history
+.history
+
+# IDE/editor config files
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# Build directories
+build/
+dist/
+
+# Dependency directories
+node_modules/
+vendor/
+
+# Virtual environment directories
+.env/
+.venv/
+
+# Log files
+*.log
+*.out
+
+# Miscellaneous
+*.tgz
+*.zip
+*.tar.gz
+
+# macOS Finder custom files
+Desktop.ini
+
