@@ -9,4 +9,4 @@ sudo chmod 600 /var/log/pcron
 
 # 创建权限文件
 sudo touch /etc/pcron.allow
-sudo touch /etc/pcron.deny
+# sudo touch /etc/pcron.deny

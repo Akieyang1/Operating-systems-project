@@ -10,19 +10,125 @@ LOG_FILE="/var/log/pcron"
 log() {
     local level="$1"
     local message="$2"
+    # 确保日志目录存在
+    mkdir -p "$(dirname "$LOG_FILE")"
     echo "$(date '+%Y-%m-%d %H:%M:%S') $level: $message" >> "$LOG_FILE"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $level: $message"
 }
 
 # 函数：检查权限（仅 root 运行）
 check_root() {
     if [ "$EUID" -ne 0 ]; then
-        echo "pcron 必须以 root 身份运行。"
+        echo "pcron 必须以 root 身份运行。" >&2
         exit 1
     fi
 }
 
-# 函数：解析时间字段
-# 返回 0 表示匹配当前时间，1 表示不匹配
+# 函数：验证配置目录
+check_config() {
+    if [ ! -d "$PCRON_DIR" ]; then
+        mkdir -p "$PCRON_DIR"
+        chmod 755 "$PCRON_DIR"
+    fi
+    
+    if [ ! -f "$PCRONTAB_FILE" ]; then
+        touch "$PCRONTAB_FILE"
+        chmod 644 "$PCRONTAB_FILE"
+    fi
+}
+
+# 函数：匹配单个时间字段
+match_field() {
+    local value="$1"
+    local field="$2"
+    local max_val="$3"
+
+
+
+    # 验证输入值范围
+    if [ "$value" -lt 0 ] || [ "$value" -gt "$max_val" ]; then
+        log "ERROR" "时间值超出范围: $value"
+        return 1
+    fi
+
+    if [ "$field" = "*" ]; then
+        return 0
+    elif [[ "$field" =~ ^\*\/([0-9]+)$ ]]; then
+        local step="${BASH_REMATCH[1]}"
+        if [ "$step" -le 0 ]; then
+            log "ERROR" "步长必须大于0: $field"
+            return 1
+        fi
+        if (( value % step == 0 )); then
+            return 0
+        fi
+        return 1
+    elif [[ "$field" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+        local start="${BASH_REMATCH[1]}"
+        local end="${BASH_REMATCH[2]}"
+        if [ "$start" -gt "$end" ] || [ "$start" -lt 0 ] || [ "$end" -gt "$max_val" ]; then
+            log "ERROR" "范围值无效: $field"
+            return 1
+        fi
+        if (( value >= start && value <= end )); then
+            return 0
+        fi
+        return 1
+    elif [[ "$field" =~ ^([0-9]+):([0-9]+)(:[0-9]+)*$ ]]; then
+        local IFS=':'
+        read -ra values <<< "$field"
+        for val in "${values[@]}"; do
+            if [ "$val" -lt 0 ] || [ "$val" -gt "$max_val" ]; then
+                log "ERROR" "列表值超出范围: $val"
+                return 1
+            fi
+            if (( value == val )); then
+                return 0
+            fi
+        done
+        return 1
+    elif [[ "$field" =~ ^([0-9]+)-([0-9]+)(~[0-9]+)*$ ]]; then
+        local include_range="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}"
+        local exclude_values
+        exclude_values=$(echo "$field" | grep -o "~[0-9]\+")
+        local IFS='-'
+        read -ra RANGE <<< "$include_range"
+        if [ "${RANGE[0]}" -gt "${RANGE[1]}" ] || [ "${RANGE[0]}" -lt 0 ] || [ "${RANGE[1]}" -gt "$max_val" ]; then
+            log "ERROR" "范围值无效: $field"
+            return 1
+        fi
+        if (( value >= RANGE[0] && value <= RANGE[1] )); then
+            if [ -n "$exclude_values" ]; then
+                for ex in $(echo "$exclude_values" | tr '~' ' '); do
+                    if [ "$ex" -lt 0 ] || [ "$ex" -gt "$max_val" ]; then
+                        log "ERROR" "排除值超出范围: $ex"
+                        return 1
+                    fi
+                    if (( value == ex )); then
+                        return 1
+                    fi
+                done
+            fi
+            return 0
+        fi
+        return 1
+    else
+        if ! [[ "$field" =~ ^[0-9]+$ ]]; then
+            log "ERROR" "无效的时间字段格式: $field"
+            return 1
+        fi
+        if [ "$field" -lt 0 ] || [ "$field" -gt "$max_val" ]; then
+            log "ERROR" "时间值超出范围: $field"
+            return 1
+        fi
+        if (( value == field )); then
+            return 0
+        fi
+        return 1
+    fi
+}
+
+# 函数：检查时间匹配
 check_time() {
     local now_sec="$1"
     local now_min="$2"
@@ -38,68 +144,15 @@ check_time() {
     local month_field="${11}"
     local week_field="${12}"
 
-    # 函数：匹配单个字段
-    match_field() {
-        local value="$1"
-        local field="$2"
-
-        if [ "$field" = "*" ]; then
-            return 0
-        elif [[ "$field" =~ ^\*\/([0-9]+)$ ]]; then
-            step="${BASH_REMATCH[1]}"
-            if (( value % step == 0 )); then
-                return 0
-            else
-                return 1
-            fi
-        elif [[ "$field" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-            start="${BASH_REMATCH[1]}"
-            end="${BASH_REMATCH[2]}"
-            if (( value >= start && value <= end )); then
-                return 0
-            else
-                return 1
-            fi
-        elif [[ "$field" =~ ^([0-9]+):([0-9]+)(:[0-9]+)*$ ]]; then
-            IFS=':' read -ra ADDR <<< "$field"
-            for val in "${ADDR[@]}"; do
-                if (( value == val )); then
-                    return 0
-                fi
-            done
-            return 1
-        elif [[ "$field" =~ ^([0-9]+)-([0-9]+)(~[0-9]+)*$ ]]; then
-            include_range="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}"
-            exclude_values=$(echo "$field" | grep -o "~[0-9]\+")
-            IFS='-' read -ra RANGE <<< "$include_range"
-            if (( value >= RANGE[0] && value <= RANGE[1] )); then
-                if [ -n "$exclude_values" ]; then
-                    for ex in $(echo "$exclude_values" | tr '~' ' '); do
-                        if (( value == ex )); then
-                            return 1
-                        fi
-                    done
-                fi
-                return 0
-            else
-                return 1
-            fi
-        else
-            if (( value == field )); then
-                return 0
-            else
-                return 1
-            fi
-        fi
-    }
-
-    # 检查各个时间字段
-    match_field "$now_sec" "$sec_field" || return 1
-    match_field "$now_min" "$min_field" || return 1
-    match_field "$now_hour" "$hour_field" || return 1
-    match_field "$now_day" "$day_field" || return 1
-    match_field "$now_month" "$month_field" || return 1
-    match_field "$now_week" "$week_field" || return 1
+    # 检查各个时间字段（添加范围验证）
+    if ! match_field "$((now_sec / 15))" "$sec_field" 3 || (( now_sec % 15 != 0 )); then
+        return 1
+    fi
+    match_field "$now_min" "$min_field" 59 || return 1
+    match_field "$now_hour" "$hour_field" 23 || return 1
+    match_field "$now_day" "$day_field" 31 || return 1
+    match_field "$now_month" "$month_field" 12 || return 1
+    match_field "$now_week" "$week_field" 6 || return 1
 
     return 0
 }
@@ -108,16 +161,31 @@ check_time() {
 execute_command() {
     local command="$1"
     local user="$2"
+    
+    # 检查命令是否为空
+    if [ -z "$command" ]; then
+        log "ERROR" "空命令"
+        return 1
+    fi
 
-    # 执行命令并捕获输出
-    output=$(bash -c "$command" 2>&1)
-    status=$?
+    # 使用 su 切换到指定用户执行命令
+    if [ "$user" = "root" ]; then
+        output=$(bash -c "$command" 2>&1)
+        status=$?
+    else
+        output=$(su - "$user" -c "$command" 2>&1)
+        status=$?
+    fi
 
     if [ $status -eq 0 ]; then
-        log "INFO" "用户 $user 执行命令: $command 成功。输出: $output"
+        log "INFO" "用户 $user 执行命令成功: $command"
+        [ -n "$output" ] && log "INFO" "命令输出: $output"
     else
-        log "ERROR" "用户 $user 执行命令: $command 失败。输出: $output"
+        log "ERROR" "用户 $user 执行命令失败: $command (退出码: $status)"
+        [ -n "$output" ] && log "ERROR" "错误输出: $output"
     fi
+
+    return $status
 }
 
 # 函数：加载所有任务
@@ -128,7 +196,7 @@ load_tasks() {
     if [ -f "$PCRONTAB_FILE" ]; then
         while IFS= read -r line; do
             # 忽略空行和注释
-            [[ -z "$line" || "$line" =~ ^# ]] && continue
+            [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
             tasks+=("$line")
         done < "$PCRONTAB_FILE"
     fi
@@ -136,53 +204,88 @@ load_tasks() {
     # 读取 /etc/pcron/ 目录下的所有用户 pcrontab 文件
     for user_crontab in "$PCRON_DIR"/pcrontab*; do
         [ -f "$user_crontab" ] || continue
+        # 从文件名中提取用户名
+        local username
+        username=$(basename "$user_crontab" | sed 's/^pcrontab//')
         while IFS= read -r line; do
-            [[ -z "$line" || "$line" =~ ^# ]] && continue
-            tasks+=("$line")
+            [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+            # 添加用户信息到任务中
+            tasks+=("$username $line")
         done < "$user_crontab"
     done
 
-    echo "${tasks[@]}"
+    # 打印全部任务
+
+    printf "%s\n" "${tasks[@]}"
+}
+
+# 函数：信号处理
+setup_signals() {
+    trap 'log "INFO" "收到 SIGTERM 信号，正在停止..."; exit 0' SIGTERM
+    trap 'log "INFO" "收到 SIGHUP 信号，重新加载配置..."; reload_config' SIGHUP
+}
+
+# 函数：重新加载配置
+reload_config() {
+    log "INFO" "重新加载配置文件"
+    check_config
 }
 
 # 主循环
 main_loop() {
+    local last_check=0
+    
     while true; do
-        # 获取当前时间
-        now_sec=$(date +%S)
-        now_min=$(date +%M)
-        now_hour=$(date +%H)
-        now_day=$(date +%d)
-        now_month=$(date +%m)
-        now_week=$(date +%w) # 0-6, 0 表示周日
+        # 获取当前时间戳
+        current_time=$(date +%s)
+        
+        # 每秒只检查一次
+        if [ "$current_time" -eq "$last_check" ]; then
+            sleep 0.1
+            continue
+        fi
+        
+        last_check=$current_time
+        
+        # 获取当前时间（强制使用十进制）
+        now_sec=$((10#$(date +%S)))
+        now_min=$((10#$(date +%M)))
+        now_hour=$((10#$(date +%H)))
+        now_day=$((10#$(date +%d)))
+        now_month=$((10#$(date +%m)))
+        now_week=$((10#$(date +%w)))
 
         # 加载所有任务
-        tasks=$(load_tasks)
-
-        # 遍历所有任务
-        for task in $tasks; do
-            # 解析任务字段
-            IFS=' ' read -r sec min hour day month week command <<< "$task"
+        while IFS= read -r task; do
+            [ -z "$task" ] && continue
+            
+            # log "INFO" "$task"
+            # 解析任务字段（现在包含用户名）
+            read -r username sec min hour day month week command <<< "$task"
 
             # 检查时间匹配
-            if check_time "$now_sec" "$now_min" "$now_hour" "$now_day" "$now_month" "$now_week" "$sec" "$min" "$hour" "$day" "$month" "$week"; then
-                # 获取任务所属用户（假设 pcrontab 文件名为 pcrontab<username>)
-                if [[ "$task" =~ ^/etc/pcron/pcrontab(.+)$ ]]; then
-                    task_user="${BASH_REMATCH[1]}"
-                else
-                    task_user="$USER"
-                fi
+            if check_time "$now_sec" "$now_min" "$now_hour" "$now_day" "$now_month" "$now_week" \
+                         "$sec" "$min" "$hour" "$day" "$month" "$week"; then
                 # 执行命令
-                execute_command "$command" "$task_user" &
+                execute_command "$command" "$username" &
             fi
-        done
+        done < <(load_tasks)
 
-        # 等待 1 秒
-        sleep 1
+        sleep 0.1
+        # log "INFO" "$now_sec"
     done
 }
 
-# 启动守护进程
-check_root
-log "INFO" "pcron 守护进程启动。"
-main_loop
+# 主程序
+main() {
+    check_root
+    check_config
+    setup_signals
+    
+    log "INFO" "pcron 守护进程启动"
+    
+    # 启动主循环
+    main_loop
+}
+
+main

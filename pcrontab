@@ -44,8 +44,8 @@ edit_crontab() {
     # 使用 Vim 进行编辑
     vim "$TEMP_FILE"
     # 保存修改
-    cp "$TEMP_FILE" "$PCRONTAB_FILE"
-    chmod 600 "$PCRONTAB_FILE"
+    cp "$TEMP_FILE" "$PCRONTAB_FILE" || echo "文件移动失败，请尝试sudo运行"
+    chmod 600 "$PCRONTAB_FILE" || echo "赋权失败，请尝试sudo运行"
     rm "$TEMP_FILE"
     echo "pcrontab 已更新。"
 }
