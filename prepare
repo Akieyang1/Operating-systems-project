@@ -13,5 +13,5 @@ sudo touch /etc/pcron.allow
 # sudo touch /etc/pcron.deny
 
 # 添加应用程序
-cp ./prcon /usr/local/bin/
-cp ./prcontab /usr/local/bin/
+cp ./pcron /usr/local/bin/
+cp ./pcrontab /usr/local/bin/

@@ -1,11 +1,13 @@
 #!/bin/bash
 
-# pcrontab - 管理 pcron 任务调度表
-
 PCRON_DIR="/etc/pcron"
-PCRONTAB_FILE="$PCRON_DIR/pcrontab$USER"
 ALLOW_FILE="/etc/pcron.allow"
 DENY_FILE="/etc/pcron.deny"
+
+# 颜色定义
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m'
 
 # 检查权限
 check_permission() {
@@ -16,7 +18,7 @@ check_permission() {
         fi
     elif [ -f "$DENY_FILE" ]; then
         if grep -qw "$USER" "$DENY_FILE"; then
-            echo "用户 $USER 被拒绝使用 pcrontab。"
+            echo "用户 $USER 被拒绝使用 pcrontab。" 
             exit 1
         fi
     else
@@ -25,100 +27,226 @@ check_permission() {
     fi
 }
 
+# 获取用户列表
+get_users() {
+    local users=()
+    if [ -f "$ALLOW_FILE" ]; then
+        while IFS= read -r user; do
+            users+=("$user" "")
+        done < "$ALLOW_FILE"
+    else
+        while IFS=: read -r username _ _ _ _ _ _; do
+            users+=("$username" "")
+        done < /etc/passwd
+    fi
+    echo "${users[@]}"
+}
+
+# 用户选择对话框
+select_user() {
+    local users=($(get_users))
+    whiptail --title "选择用户" --menu "请选择要操作的用户：" 20 60 10 \
+    "${users[@]}" 3>&1 1>&2 2>&3
+}
+
+# 显示任务列表
+show_list() {
+    local file="$1"
+    if [ -f "$file" ]; then
+        whiptail --title "任务列表 - $file" --textbox "$file" 20 80 \
+        --scrolltext --ok-button "返回"
+    else
+        whiptail --title "错误" --msgbox "没有找到 pcrontab 文件。请先编辑添加。" 8 60
+    fi
+}
+
+# 新版编辑函数
+edit_with_vim() {
+    local file="$1"
+    local temp_file="/tmp/pcrontab_temp.$$"
+    
+    # 保留原有内容或创建新文件
+    cp "$file" "$temp_file" 2>/dev/null || touch "$temp_file"
+    
+    # 生成带语法高亮的临时文件
+    echo -e "# 时间格式说明：
+# 字段1: 秒 (0-3)    | 示例：*/1 表示每15秒
+# 字段2: 分钟 (0-59)  | 示例：0,15,30,45
+# 字段3: 小时 (0-23)  | 示例：8-18
+# 字段4: 日 (1-31)    | 示例：1,15
+# 字段5: 月 (1-12)    | 示例：*/3
+# 字段6: 星期 (0-6)   | 0=周日
+# 字段7: 命令（必须使用绝对路径）
+" > "$temp_file"
+    grep -v '^#' "${file}" 2>/dev/null >> "$temp_file"
+
+    # 使用vim编辑
+    vim "+set syntax=crontab" "+set number" "+set autoindent" "$temp_file"
+    
+    # 格式验证
+    while ! validate_crontab "$temp_file"; do
+        vim "+set syntax=crontab" "+set number" "+set autoindent" "$temp_file"
+    done
+    
+    # 保存有效内容
+    grep -v '^#' "$temp_file" > "$file"
+    sudo chmod 700 "$file" || echo "赋权失败，请尝试sudo运行"
+    rm -f "$temp_file"
+}
+
+# 格式验证函数
+validate_crontab() {
+    local file="$1"
+    local line_num=0
+    
+    while IFS= read -r line; do
+        ((line_num++))
+        
+        # 跳过空行和注释
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        
+        # 去除行尾注释
+        line=$(echo "$line" | sed 's/#.*$//')
+        [[ -z "$line" ]] && continue  # 处理纯注释行
+
+        # 分割字段
+        IFS=$' \t' read -r -a fields <<< "$line"
+        if [ ${#fields[@]} -lt 7 ]; then
+            whiptail --title "验证失败" --msgbox "第${line_num}行: 字段数量错误 (需要7个字段)\n实际内容：$line" 10 60
+            return 1
+        fi
+        
+        # 验证时间字段
+        for i in {0..5}; do
+            if ! [[ "${fields[$i]}" =~ ^([0-9*/-]+|([0-9]+~)+[0-9]+)$ ]]; then
+                whiptail --title "验证失败" --msgbox "第${line_num}行: 第$((i+1))字段格式无效\n字段内容：${fields[$i]}" 10 60
+                return 1
+            fi
+        done
+    done < "$file"
+    
+    return 0
+}
+
+
+
+# 主菜单
+main_menu() {
+    while true; do
+        choice=$(whiptail --title "pcron 任务管理" --menu "请选择操作：" 15 60 4 \
+        "1" "查看任务列表" \
+        "2" "编辑任务" \
+        "3" "删除所有任务" \
+        "0" "退出" 3>&1 1>&2 2>&3)
+
+        case $choice in
+            1)
+                show_list "$PCRONTAB_FILE"
+                ;;
+            2)
+                edit_with_vim "$PCRONTAB_FILE"
+                ;;
+            3)
+                if (whiptail --title "确认删除" --yesno "确定要删除所有任务吗？" 8 60); then
+                    rm -f "$PCRONTAB_FILE"
+                    whiptail --title "成功" --msgbox "pcrontab 文件已删除。" 8 60
+                fi
+                ;;
+            0)
+                exit 0
+                ;;
+            *)
+                exit 1
+                ;;
+        esac
+    done
+}
+
+# 初始化界面
+init_ui() {
+    if [ "$EUID" -eq 0 ]; then
+        selected_user=$(select_user)
+        [ -z "$selected_user" ] && exit 1
+        PCRONTAB_FILE="$PCRON_DIR/pcrontab$selected_user"
+        export USER="$selected_user"
+    else
+        PCRONTAB_FILE="$PCRON_DIR/pcrontab$USER"
+    fi
+
+    check_permission
+    main_menu
+}
+
+
+
 # 列出任务
 list_crontab() {
-    if [ -f "$PCRONTAB_FILE" ]; then
-        cat "$PCRONTAB_FILE"
+    if [ -f "$1" ]; then
+        cat "$1"
     else
-        echo "没有找到 pcrontab 文件。"
+        echo "没有找到 pcrontab 文件。请先-e编辑添加。"
     fi
 }
 
 # 编辑任务
 edit_crontab() {
     TEMP_FILE="/tmp/pcrontab_temp"
-    cp "$PCRONTAB_FILE" "$TEMP_FILE" 2>/dev/null
+    cp "$1" "$TEMP_FILE" 2>/dev/null
     if [ $? -ne 0 ]; then
         touch "$TEMP_FILE"
     fi
     # 使用 Vim 进行编辑
     vim "$TEMP_FILE"
     # 保存修改
-    cp "$TEMP_FILE" "$PCRONTAB_FILE" || echo "文件移动失败，请尝试sudo运行"
-    chmod 600 "$PCRONTAB_FILE" || echo "赋权失败，请尝试sudo运行"
+    cp "$TEMP_FILE" "$1" || echo "文件移动失败，请尝试sudo运行"
+    sudo chmod 600 "$1" || echo "赋权失败，请尝试sudo运行"
     rm "$TEMP_FILE"
     echo "pcrontab 已更新。"
 }
 
 # 删除任务
 remove_crontab() {
-    if [ -f "$PCRONTAB_FILE" ]; then
-        rm "$PCRONTAB_FILE"
+    if [ -f "$1" ]; then
+        rm "$1"
         echo "pcrontab 文件已删除。"
     else
         echo "没有找到 pcrontab 文件。"
     fi
 }
 
-# 解析命令行参数
-if [ "$EUID" -eq 0 ]; then
-    TARGET_USER="$2"
+# 参数处理
+if [ $# -eq 0 ]; then
+    init_ui
+    echo "1"
 else
+    # 解析命令行参数
     TARGET_USER="$USER"
-fi
-
-while getopts ":u:ler" opt; do
-    case $opt in
-        u)
-            TARGET_USER="$OPTARG"
-            ;;
-        l)
-            ACTION="list"
-            ;;
-        e)
-            ACTION="edit"
-            ;;
-        r)
-            ACTION="remove"
-            ;;
-        \?)
-            echo "无效的选项: -$OPTARG" >&2
-            exit 1
-            ;;
-    esac
-done
-
-# 切换到目标用户
-if [ "$TARGET_USER" != "$USER" ]; then
-    if [ "$EUID" -ne 0 ]; then
-        echo "只有 root 用户可以指定其他用户。"
-        exit 1
+    
+    while getopts ":u:ler" opt; do
+        case $opt in
+            u) TARGET_USER="$OPTARG" ;;
+            l) ACTION="list" ;;
+            e) ACTION="edit" ;;
+            r) ACTION="remove" ;;
+            \?) echo "无效选项: -$OPTARG" >&2; exit 1 ;;
+        esac
+    done
+    
+    # 切换用户逻辑（保持原有实现）
+    if [ "$TARGET_USER" != "$USER" ]; then
+        [ "$EUID" -ne 0 ] && echo "需要root权限" && exit 1
     fi
-    # 使用 sudo 切换用户环境
-    USER_HOME=$(eval echo "~$TARGET_USER")
-    PCRONTAB_FILE="$PCRON_DIR/pcrontab$TARGET_USER"
-    # 设置环境变量
-    export USER="$TARGET_USER"
+        PCRONTAB_FILE="$PCRON_DIR/pcrontab$TARGET_USER"
+    
+    
+
+    check_permission
+    case $ACTION in
+        list) list_crontab "$PCRONTAB_FILE" ;;
+        edit) edit_crontab "$PCRONTAB_FILE";;
+        remove) remove_crontab "$PCRONTAB_FILE" ;;
+        *) echo "使用方法: pcrontab [-u 用户] {-l | -e | -r}" ;;
+    esac
 fi
-
-# 检查权限
-check_permission
-
-# 执行动作
-case $ACTION in
-    list)
-        list_crontab
-        ;;
-    edit)
-        edit_crontab
-        ;;
-    remove)
-        remove_crontab
-        ;;
-    *)
-        echo "使用方法: pcrontab [-u 用户] {-l | -e | -r}"
-        exit 1
-        ;;
-esac
 
 exit 0
