@@ -11,52 +11,40 @@ NC='\033[0m'
 
 # 检查权限
 check_permission() {
+    # 自动处理冲突文件
+    if [ -f "$ALLOW_FILE" ] && [ -f "$DENY_FILE" ]; then
+        rm -f "$DENY_FILE"
+        whiptail --title "Conflit de configuration" --msgbox "Fichiers allow et deny détectés simultanément\n$DENY_FILE a été supprimé" 10 60
+    elif [ ! -f "$ALLOW_FILE" ] && [ ! -f "$DENY_FILE" ]; then
+        touch "$ALLOW_FILE"
+        whiptail --title "Configuration initiale" --msgbox "Aucun fichier d'autorisation trouvé\nFichier allow par défaut créé : $ALLOW_FILE" 10 60
+    fi
+
+    if [ "$EUID" -eq 0 ]; then
+        return 0
+    fi
+
     if [ -f "$ALLOW_FILE" ]; then
         if ! grep -qw "$USER" "$ALLOW_FILE"; then
-            echo "用户 $USER 没有权限使用 pcrontab。"
+            whiptail --title "Permission refusée" --msgbox "L'utilisateur $USER n'a pas la permission d'utiliser pcrontab" 8 60
             exit 1
         fi
-    elif [ -f "$DENY_FILE" ]; then
+    else
         if grep -qw "$USER" "$DENY_FILE"; then
-            echo "用户 $USER 被拒绝使用 pcrontab。" 
+            whiptail --title "Permission refusée" --msgbox "L'utilisateur $USER est interdit d'utiliser pcrontab" 8 60
             exit 1
         fi
-    else
-        echo "未配置权限文件，默认拒绝所有用户。"
-        exit 1
     fi
-}
-
-# 获取用户列表
-get_users() {
-    local users=()
-    if [ -f "$ALLOW_FILE" ]; then
-        while IFS= read -r user; do
-            users+=("$user" "")
-        done < "$ALLOW_FILE"
-    else
-        while IFS=: read -r username _ _ _ _ _ _; do
-            users+=("$username" "")
-        done < /etc/passwd
-    fi
-    echo "${users[@]}"
-}
-
-# 用户选择对话框
-select_user() {
-    local users=($(get_users))
-    whiptail --title "选择用户" --menu "请选择要操作的用户：" 20 60 10 \
-    "${users[@]}" 3>&1 1>&2 2>&3
 }
 
 # 显示任务列表
 show_list() {
     local file="$1"
     if [ -f "$file" ]; then
-        whiptail --title "任务列表 - $file" --textbox "$file" 20 80 \
-        --scrolltext --ok-button "返回"
+        whiptail --title "Liste des tâches - $file" --textbox "$file" 20 80 \
+        --scrolltext --ok-button "Retour"
     else
-        whiptail --title "错误" --msgbox "没有找到 pcrontab 文件。请先编辑添加。" 8 60
+        whiptail --title "Erreur" --msgbox "Aucun fichier pcrontab trouvé. Veuillez d'abord en créer un." 8 60
     fi
 }
 
@@ -69,14 +57,14 @@ edit_with_vim() {
     cp "$file" "$temp_file" 2>/dev/null || touch "$temp_file"
     
     # 生成带语法高亮的临时文件
-    echo -e "# 时间格式说明：
-# 字段1: 秒 (0-3)    | 示例：*/1 表示每15秒
-# 字段2: 分钟 (0-59)  | 示例：0,15,30,45
-# 字段3: 小时 (0-23)  | 示例：8-18
-# 字段4: 日 (1-31)    | 示例：1,15
-# 字段5: 月 (1-12)    | 示例：*/3
-# 字段6: 星期 (0-6)   | 0=周日
-# 字段7: 命令（必须使用绝对路径）
+    echo -e "# Explication du format horaire :
+# Champ 1: Secondes (0-59)  | Ex: */15 = toutes les 15s
+# Champ 2: Minutes (0-59)    | Ex: 0,15,30,45
+# Champ 3: Heures (0-23)    | Ex: 8-18
+# Champ 4: Jour (1-31)      | Ex: 1,15
+# Champ 5: Mois (1-12)      | Ex: */3
+# Champ 6: Semaine (0-6)    | 0=Dimanche
+# Champ 7: Commande (chemin absolu requis)
 " > "$temp_file"
     grep -v '^#' "${file}" 2>/dev/null >> "$temp_file"
 
@@ -90,7 +78,6 @@ edit_with_vim() {
     
     # 保存有效内容
     grep -v '^#' "$temp_file" > "$file"
-    sudo chmod 700 "$file" || echo "赋权失败，请尝试sudo运行"
     rm -f "$temp_file"
 }
 
@@ -112,14 +99,14 @@ validate_crontab() {
         # 分割字段
         IFS=$' \t' read -r -a fields <<< "$line"
         if [ ${#fields[@]} -lt 7 ]; then
-            whiptail --title "验证失败" --msgbox "第${line_num}行: 字段数量错误 (需要7个字段)\n实际内容：$line" 10 60
+            whiptail --title "Échec de validation" --msgbox "Ligne ${line_num}: Nombre de champs incorrect (7 requis)\nContenu: $line" 10 60
             return 1
         fi
         
         # 验证时间字段
         for i in {0..5}; do
             if ! [[ "${fields[$i]}" =~ ^([0-9*/-]+|([0-9]+~)+[0-9]+)$ ]]; then
-                whiptail --title "验证失败" --msgbox "第${line_num}行: 第$((i+1))字段格式无效\n字段内容：${fields[$i]}" 10 60
+                whiptail --title "Échec de validation" --msgbox "Ligne ${line_num}: Champ $((i+1)) invalide\nContenu: ${fields[$i]}" 10 60
                 return 1
             fi
         done
@@ -128,16 +115,72 @@ validate_crontab() {
     return 0
 }
 
+# 权限文件管理函数
+manage_permission_files() {
+    while true; do
+        # 自动检测当前模式
+        if [ -f "$ALLOW_FILE" ]; then
+            current_mode="allow"
+            current_file="$ALLOW_FILE"
+        else
+            current_mode="deny"
+            current_file="$DENY_FILE"
+        fi
 
+        choice=$(whiptail --title "Gestion des autorisations ($current_mode)" --menu "Options :" 15 60 4 \
+        "1" "Changer mode (allow/deny)" \
+        "2" "Éditer fichier" \
+        "3" "Voir fichier" \
+        "0" "Retour" 3>&1 1>&2 2>&3)
+
+        case $choice in
+            1)
+                new_mode=$(whiptail --title "Changer mode" --radiolist "Choisir le nouveau mode :" 15 60 2 \
+                "allow" "Mode blanc" $([ "$current_mode" = "allow" ] && echo "ON" || echo "OFF") \
+                "deny" "Mode noir" $([ "$current_mode" = "deny" ] && echo "ON" || echo "OFF") 3>&1 1>&2 2>&3)
+
+                if [ "$new_mode" = "allow" ]; then
+                    rm -f "$DENY_FILE"
+                    touch "$ALLOW_FILE"
+                    create_user_files
+                else
+                    rm -f "$ALLOW_FILE"
+                    touch "$DENY_FILE"
+                    create_user_files
+                fi
+                ;;
+            2)
+                vim "$current_file"
+                create_user_files
+                ;;
+            3)
+                whiptail --title "Contenu du fichier ($current_file)" --textbox "$current_file" 20 80
+                ;;
+            0)
+                return
+                ;;
+        esac
+    done
+}
 
 # 主菜单
 main_menu() {
     while true; do
-        choice=$(whiptail --title "pcron 任务管理" --menu "请选择操作：" 15 60 4 \
-        "1" "查看任务列表" \
-        "2" "编辑任务" \
-        "3" "删除所有任务" \
-        "0" "退出" 3>&1 1>&2 2>&3)
+        # 管理员菜单判断
+        if [ "$EUID" -eq 0 ]; then
+            choice=$(whiptail --title "pcron  Gestion des tâches" --menu "Choisissez l'opération :" 15 60 5 \
+            "1" "Voir tâches globales" \
+            "2" "Éditer tâches globales" \
+            "3" "Supprimer tâches globales" \
+            "4" "Gérer les autorisations" \
+            "0" "Quitter" 3>&1 1>&2 2>&3)
+        else
+            choice=$(whiptail --title "pcron  Gestion des tâches" --menu "Choisissez l'opération :" 15 60 4 \
+            "1" "Voir mes tâches" \
+            "2" "Éditer mes tâches" \
+            "3" "Supprimer mes tâches" \
+            "0" "Quitter" 3>&1 1>&2 2>&3)
+        fi
 
         case $choice in
             1)
@@ -147,10 +190,13 @@ main_menu() {
                 edit_with_vim "$PCRONTAB_FILE"
                 ;;
             3)
-                if (whiptail --title "确认删除" --yesno "确定要删除所有任务吗？" 8 60); then
-                    rm -f "$PCRONTAB_FILE"
-                    whiptail --title "成功" --msgbox "pcrontab 文件已删除。" 8 60
+                if (whiptail --title "Confirmer la suppression" --yesno "Êtes-vous sûr de vouloir supprimer toutes les tâches ?" 8 60); then
+                    echo "" > "$PCRONTAB_FILE"
+                    whiptail --title "Succès" --msgbox "pcrontab  fichier supprimé." 8 60
                 fi
+                ;;
+            4)
+                manage_permission_files
                 ;;
             0)
                 exit 0
@@ -165,10 +211,7 @@ main_menu() {
 # 初始化界面
 init_ui() {
     if [ "$EUID" -eq 0 ]; then
-        selected_user=$(select_user)
-        [ -z "$selected_user" ] && exit 1
-        PCRONTAB_FILE="$PCRON_DIR/pcrontab$selected_user"
-        export USER="$selected_user"
+        PCRONTAB_FILE="$PCRON_DIR/pcrontab"
     else
         PCRONTAB_FILE="$PCRON_DIR/pcrontab$USER"
     fi
@@ -177,14 +220,12 @@ init_ui() {
     main_menu
 }
 
-
-
 # 列出任务
 list_crontab() {
     if [ -f "$1" ]; then
         cat "$1"
     else
-        echo "没有找到 pcrontab 文件。请先-e编辑添加。"
+        echo "Aucun fichier pcrontab trouvé."
     fi
 }
 
@@ -198,26 +239,42 @@ edit_crontab() {
     # 使用 Vim 进行编辑
     vim "$TEMP_FILE"
     # 保存修改
-    cp "$TEMP_FILE" "$1" || echo "文件移动失败，请尝试sudo运行"
-    sudo chmod 600 "$1" || echo "赋权失败，请尝试sudo运行"
+    cp "$TEMP_FILE" "$1" || echo "Échec de déplacement du fichier, veuillez essayer d'exécuter sudo"
     rm "$TEMP_FILE"
-    echo "pcrontab 已更新。"
+    echo "pcrontab mis à jour."
 }
 
 # 删除任务
 remove_crontab() {
     if [ -f "$1" ]; then
-        rm "$1"
-        echo "pcrontab 文件已删除。"
+        echo "" > "$1"
+        echo "pcrontab fichier supprimé."
     else
-        echo "没有找到 pcrontab 文件。"
+        echo "Aucun fichier pcrontab trouvé."
+    fi
+}
+
+# 创建用户文件
+create_user_files() {
+    if [ -f "$ALLOW_FILE" ]; then
+        while IFS= read -r user; do
+            touch "$PCRON_DIR/pcrontab$user"
+            chown $user "$PCRON_DIR/pcrontab$user"
+        done < "$ALLOW_FILE"
+    else
+        getent passwd | cut -d: -f1 | while read -r user; do
+            if ! grep -qw "$user" "$DENY_FILE"; then
+                touch "$PCRON_DIR/pcrontab$user"
+                chown $user "$PCRON_DIR/pcrontab$user"
+            fi
+        done
     fi
 }
 
 # 参数处理
 if [ $# -eq 0 ]; then
     init_ui
-    echo "1"
+    
 else
     # 解析命令行参数
     TARGET_USER="$USER"
@@ -228,24 +285,22 @@ else
             l) ACTION="list" ;;
             e) ACTION="edit" ;;
             r) ACTION="remove" ;;
-            \?) echo "无效选项: -$OPTARG" >&2; exit 1 ;;
+            \?) echo "Option invalide: -$OPTARG" >&2; exit 1 ;;
         esac
     done
     
     # 切换用户逻辑（保持原有实现）
     if [ "$TARGET_USER" != "$USER" ]; then
-        [ "$EUID" -ne 0 ] && echo "需要root权限" && exit 1
+        [ "$EUID" -ne 0 ] && echo "Besoin de privilèges root" && exit 1
     fi
         PCRONTAB_FILE="$PCRON_DIR/pcrontab$TARGET_USER"
     
-    
-
     check_permission
     case $ACTION in
         list) list_crontab "$PCRONTAB_FILE" ;;
         edit) edit_crontab "$PCRONTAB_FILE";;
         remove) remove_crontab "$PCRONTAB_FILE" ;;
-        *) echo "使用方法: pcrontab [-u 用户] {-l | -e | -r}" ;;
+        *) echo "Utilisation: pcrontab [-u utilisateur] {-l | -e | -r}" ;;
     esac
 fi
 
