@@ -43,11 +43,9 @@ match_field() {
     local field="$2"
     local max_val="$3"
 
-
-
     # 验证输入值范围
-    if [ "$value" -lt 0 ] || [ "$value" -gt "$max_val" ]; then
-        log "ERROR" "时间值超出范围: $value"
+    if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -lt 0 ] || [ "$value" -gt "$max_val" ]; then
+        log "ERROR" "时间值超出范围或格式错误: $value, 期望值范围是 0 到 $max_val"
         return 1
     fi
 
@@ -111,6 +109,19 @@ match_field() {
             fi
             return 0
         fi
+        return 1
+    elif [[ "$field" =~ ^([0-9,]+)$ ]]; then
+        # 处理逗号分隔的数字
+        IFS=',' read -ra values <<< "$field"
+        for val in "${values[@]}"; do
+            if [ "$val" -lt 0 ] || [ "$val" -gt "$max_val" ]; then
+                log "ERROR" "列表值超出范围: $val"
+                return 1
+            fi
+            if (( value == val )); then
+                return 0
+            fi
+        done
         return 1
     else
         if ! [[ "$field" =~ ^[0-9]+$ ]]; then
